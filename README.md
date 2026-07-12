@@ -212,9 +212,3 @@ curl -X POST http://127.0.0.1:8000/analyze_repo \
 - Stream analysis progress from the backend instead of polling in-memory status.
 - Add richer duplicate-code and modularity metrics.
 - Add authentication and multi-user project storage.
-
-## Resume Bullets
-
-- Built a hybrid RAG repository intelligence app using FastAPI, Streamlit, NetworkX, AST parsing, and local vector retrieval.
-- Implemented repository ingestion, role-aware chunking, code graph extraction, weakness detection, Mermaid architecture diagrams, and citation-grounded chat.
-- Designed a provider-friendly architecture that runs offline by default and can be extended with external LLM or embedding APIs.
