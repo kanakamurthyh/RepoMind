@@ -41,3 +41,25 @@ def test_install_md_commands_are_official_and_scripts_are_helpers(tmp_path):
     helper_paths = {item["path"] for item in facts["helper_scripts"]}
     assert "benchmarks/smoke_test.sh" in helper_paths
     assert "devtools/setup-demo-vm.sh" in helper_paths
+
+
+def test_readme_summary_skips_taglines_and_badges_for_intro_prose(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text(
+        "# SolarSense\n\n"
+        "**Solar Plant Feasibility Analysis & Power Forecasting for any location on Earth**\n\n"
+        "`Python` · `XGBoost` · `Streamlit` · `Open-Meteo API` · `NASA POWER API` · `Docker`\n\n"
+        "---\n\n"
+        "## Overview\n\n"
+        "SolarSense is a decision support tool that estimates whether a site is viable for a solar plant.\n\n"
+        "## Engineered Features\n\n"
+        "| Feature | Type |\n|---|---|\n| irradiation_sq | Derived |\n",
+        encoding="utf-8",
+    )
+    records = FileScanner(max_file_size_bytes=10000).scan("demo", repo)
+    facts = RepoFactsCollector().collect("https://github.com/example/solar", records, CodeGraphBuilder().build(records))
+
+    assert facts["readme_has_overview"] is True
+    assert facts["readme_summary"].startswith("SolarSense is a decision support tool")
+    assert facts["readme_features"] == []  # "Engineered Features" describes model inputs, not project features

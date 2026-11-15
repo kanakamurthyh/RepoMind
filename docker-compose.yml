@@ -3,12 +3,41 @@ services:
     image: postgres:16
     environment:
       POSTGRES_DB: repomind
-      POSTGRES_USER: repomind
-      POSTGRES_PASSWORD: repomind
+      POSTGRES_USER: ${POSTGRES_USER:-repomind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - repomind_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-repomind}"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-repomind}:${POSTGRES_PASSWORD}@postgres:5432/repomind
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - repomind_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ui:
+    build: .
+    command: ["streamlit", "run", "app/ui/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    environment:
+      REPOMIND_API_URL: http://api:8000
+      REPOMIND_API_KEY: ${REPOMIND_API_KEY:-}
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      - api
 
 volumes:
   repomind_postgres:
+  repomind_data:

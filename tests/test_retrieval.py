@@ -95,3 +95,23 @@ def test_run_retrieval_prioritizes_install_doc_over_helper_scripts(tmp_path):
 
     assert context["selected_chunks"][0]["file_path"] == "INSTALL.md"
     assert "benchmarks/smoke_test.sh" not in context["relevant_files"]
+
+
+def test_retrieval_reports_evidence_strength(tmp_path):
+    store = VectorStore(tmp_path)
+    store.build(
+        "demo",
+        [
+            Chunk("c1", "demo", "pay.py", "python", "code", 1, 3, "def charge_card(token):\n    return gateway.charge(token)", symbol="charge_card"),
+            Chunk("c2", "demo", "README.md", "markdown", "docs", 1, 2, "Payments demo."),
+        ],
+    )
+    retriever = HybridRetriever(store)
+
+    found = retriever.retrieve("demo", "How is a card charged?", {})
+    absent = retriever.retrieve("demo", "Where are Kafka consumers defined?", {})
+
+    assert found["evidence_strength"] == "strong" and found["evidence"]["basis"] == "term_coverage"
+    assert absent["evidence_strength"] == "none"
+    assert absent["evidence"]["absent_from_repo"] == ["kafka", "consumers"]
+    assert absent["selected_chunks"], "closest matches are still returned for display"

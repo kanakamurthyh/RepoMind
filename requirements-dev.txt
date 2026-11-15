@@ -1,0 +1,7 @@
+# Development, lint and test tooling. Not installed in the Docker image.
+-r requirements.txt
+pytest>=8.0
+pytest-cov>=5.0
+# HTTP transport for FastAPI/Starlette's TestClient (current Starlette imports httpx2, falling back to httpx).
+httpx2>=0.28
+ruff>=0.6

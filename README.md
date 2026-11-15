@@ -1,214 +1,136 @@
-# RepoMind: Hybrid RAG Chatbot for GitHub Repository Intelligence
+# RepoMind: Repository Intelligence with Hybrid Code RAG
 
-RepoMind analyzes a public GitHub repository, builds a local hybrid knowledge base, generates a structured repo summary, detects weaknesses, and answers questions with source citations.
+[![CI](https://github.com/kanakamurthyh/RepoMind/actions/workflows/tests.yml/badge.svg)](https://github.com/kanakamurthyh/RepoMind/actions/workflows/tests.yml)
 
-Unlike a basic "chunk files and ask an LLM" demo, RepoMind combines:
+RepoMind analyzes a public GitHub repository and answers questions about it with **line-level citations that are checked against the evidence it actually retrieved**. It combines a code knowledge graph, multi-channel hybrid retrieval, and deterministic static analysis. Analysis and Q&A run without an LLM or API key; an LLM (Gemini or any OpenAI-compatible endpoint, including local Ollama) is optional.
 
-- Semantic vector retrieval over README files, docs, configs, tests, and code chunks.
-- Code-aware graph retrieval over files, folders, imports, functions, classes, routes, entry points, and dependencies.
-- Static weakness analysis for documentation, testing, deployment, maintainability, and security risks.
-- Deterministic repo-fact extraction for summaries, architecture, run instructions, important files, and quality scoring.
-- A FastAPI backend and Streamlit demo UI.
+> Full project status, architecture, and design notes: **[CURRENT_STATE.md](CURRENT_STATE.md)**
 
-## Architecture
+## What it does
 
-```mermaid
-flowchart TD
-    User["User"] --> UI["Streamlit UI"]
-    UI --> API["FastAPI API"]
-    API --> Analyzer["RepoAnalyzer"]
-    Analyzer --> Git["Git clone/cache"]
-    Analyzer --> Scanner["FileScanner"]
-    Scanner --> Chunker["Role-aware Chunker"]
-    Chunker --> Vector["Vector Store: Chroma optional, local JSON fallback"]
-    Analyzer --> Postgres["SQLAlchemy Metadata DB: PostgreSQL/SQLite"]
-    Scanner --> Parser["Python AST + optional Tree-sitter parsers"]
-    Parser --> Graph["NetworkX Code Graph + persisted metadata"]
-    Scanner --> Weaknesses["Weakness Detector"]
-    Vector --> Retriever["Hybrid Retriever"]
-    Graph --> Retriever
-    Retriever --> Chat["Grounded Chat Service"]
-```
-
-## Features
-
-- Accepts public `https://github.com/{owner}/{repo}` URLs.
-- Avoids re-cloning analyzed repositories unless force rebuild is requested.
-- Uses a configurable ingestion policy for file count, repo byte budget, per-file byte limits, symlink handling, and binary metadata capture.
-- Ignores `.git`, `node_modules`, virtualenvs, build outputs, caches, and other noisy paths while preserving safe metadata for unsupported binaries.
-- Detects languages, docs, configs, test files, important files, framework hints, and entry points.
-- Generates polished repo-level reports from structured facts instead of copying arbitrary retrieved chunks.
-- Prioritizes official docs for setup/run questions: `INSTALL.md`, top-level `README.md`, setup docs, package files, then only helper scripts explicitly mentioned by docs.
-- Uses different chunking strategies for docs, configs, Python code, and fallback text.
-- Uses Python AST chunking and JS/TS symbol-aware chunking for code files.
-- Persists metadata through SQLAlchemy 2.x, with PostgreSQL/Alembic support and SQLite/JSON fallback for local demos.
-- Stores vector indexes in Chroma when `VECTOR_STORE_PROVIDER=chroma`; otherwise uses a persistent local JSON fallback for no-network testing.
-- Builds a NetworkX graph with file, folder, dependency, local file dependency, function, class, route, call, inheritance, and entrypoint relationships where detectable.
-- Uses graph node/edge scoring to boost chunks from files connected to relevant routes, imports, functions, classes, and entry points.
-- Classifies chat questions into overview, installation, architecture, file location, function/class, flow, dependency, weakness, testing, and security intents.
-- Answers with file references and line ranges from retrieved chunks.
-- Provides rendered Mermaid architecture diagrams, graph metrics, weakness reports, and a structured initial summary.
-- Computes a 0-100 quality score across documentation, test signals, structure, and run/deployment readiness.
-- Reports security as automated static review findings with severity, confidence, affected location, evidence, and remediation instead of a misleading numeric security score.
-
-## Setup
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-cp .env.example .env
-```
-
-RepoMind works in local extractive mode without an external LLM key. To use Gemini for grounded answer synthesis, put your key in `.env`; `LLM_PROVIDER=auto` will use Gemini automatically when the key is present.
-
-```bash
-GEMINI_API_KEY=your_real_key_here
-LLM_PROVIDER=auto
-GEMINI_MODEL=gemini-flash-latest
-```
-
-Restart the backend after changing `.env`. If you copied an older config that says `LLM_PROVIDER=local`, Gemini will still be used when `GEMINI_API_KEY` is present. Use `LLM_PROVIDER=off` only when you explicitly want to disable external LLM calls.
-
-For semantic embeddings, Chroma, and Tree-sitter grammar packages, install the optional advanced stack:
-
-```bash
-python -m pip install -r requirements-advanced.txt
-```
-
-Chroma is the selected vector DB because it is simple to run locally, persists to disk without a separate service, supports metadata filters, and can be swapped behind RepoMind's vector-store interface. PostgreSQL is used for production-style metadata persistence; SQLite is the safe default when `DATABASE_URL` is unset.
-
-## Environment Variables
-
-| Variable | Purpose |
+| Capability | How |
 | --- | --- |
-| `OPENAI_API_KEY` | Optional key for future OpenAI synthesis/embedding providers. |
-| `GEMINI_API_KEY` | Optional key for Gemini answer synthesis. |
-| `EMBEDDING_PROVIDER` | Defaults to `sentence-transformers`; falls back to deterministic local hashing when optional semantic deps are unavailable. |
-| `EMBEDDING_MODEL` | Semantic embedding model name, default `sentence-transformers/all-MiniLM-L6-v2`. |
-| `EMBEDDING_BATCH_SIZE` | Batch size for embedding providers. |
-| `VECTOR_STORE_PROVIDER` | `local` or `chroma`; defaults to `local` for reliable demos. |
-| `LLM_PROVIDER` | Use `auto` for Gemini when `GEMINI_API_KEY` exists, or `off` to force no external LLM. |
-| `GEMINI_MODEL` | Gemini model name, default `gemini-flash-latest`; RepoMind retries current Flash fallbacks if a configured model returns 404. |
-| `LOCAL_MODEL_MODE` | Keep `true` for no-key local demos; Gemini still works automatically when a key is set. |
-| `REPOMIND_DATA_DIR` | Artifact directory, default `data`. |
-| `DATABASE_URL` | SQLAlchemy database URL. Use PostgreSQL for production-style runs; unset uses SQLite under `data/db`. |
-| `USE_METADATA_DB` | Enables SQLAlchemy metadata persistence, default `true`. |
-| `MAX_FILE_SIZE_BYTES` | Per-file scan cap, default `300000`. |
-| `MAX_CHUNKS_PER_REPO` | Safety cap for vector indexing, default `5000`. |
-| `MAX_FILES_PER_REPO` | Maximum scanned files before stopping, default `15000`. |
-| `MAX_TOTAL_REPO_BYTES` | Maximum total bytes scanned per repo, default `250000000`. |
-| `BINARY_METADATA_ENABLED` | Capture binary/unsupported metadata without embedding content. |
-| `FOLLOW_SYMLINKS` | Defaults to `false` to avoid symlink traversal. |
+| **Grounded Q&A** | 7-channel retrieval (dense · BM25 · exact symbol · mentioned files · intent priority · extracted facts · graph expansion) → weighted RRF → reranker → answer with `[S#]` citations. Answers report evidence strength and abstain when the repo lacks strong evidence |
+| **Repo Detective agent** | Tool-using investigation (search, grep, read_file, find_symbol, callers, callees, call_path). Works with an LLM or with a deterministic plan |
+| **Code knowledge graph** | Files, symbols (qualified `Class.method`), resolved imports, resolved calls, routes → handlers, env vars, inheritance; PageRank centrality, import cycles |
+| **Docs-vs-code drift** | Checks README commands, `npm run`/`make` targets, env vars, documented endpoints and links against the actual code |
+| **Dependency risk** | OSV.dev scan of pinned versions with **import-level** reachability and fixed versions (network; can be disabled) |
+| **Git hotspots** | Churn × complexity hotspots, contributors, bus factor (within the shallow-clone history window) |
+| **Static findings** | AST-based Python checks, regex JS/TS XSS/exec checks, entropy-aware secret detection, committed `.env` files |
+| **Health score** | Traceable hygiene signals with an assessed denominator and possible score range; unavailable dependency checks remain unknown. An indicator, not a correctness guarantee |
+| **MCP server** | Analysis, search, Q&A, the Detective agent, symbol lookup, file reads and insights as MCP tools (stdio) for Claude Code, Cursor, or any MCP client |
 
-## Database Setup
+## What is (and isn't) verified
 
-For PostgreSQL-backed metadata:
+- **Default "dense" channel is lexical.** Out of the box it uses an offline feature-hashing embedder, not a neural model. Semantic embeddings (`all-MiniLM-L6-v2`) and the cross-encoder reranker (`ms-marco-MiniLM-L-6-v2`) are general-purpose, not code-tuned, and opt-in: install `requirements-advanced.txt` **and** set `EMBEDDING_PROVIDER` / `RERANKER_PROVIDER`.
+- **Citation checks are structural.** Source ids and complete line ranges are checked against text actually presented in the prompt or tool observation. Symbol locations alone do not count as inspected source. Whether a cited span actually *supports* the sentence remains **unassessed**.
+- **Partial coverage is reported.** Repository caps, per-file truncation, unreadable files and Python parse failures are explicit. File-count fractions do not measure semantic understanding.
+- **Repo text is untrusted.** It is escaped inside the prompt's source blocks, secrets are redacted before reaching an LLM, the UI or logs, and the agent's `grep` is literal by default with bounded regex.
 
-```bash
-docker compose up -d postgres
-source .venv/bin/activate
-export DATABASE_URL=postgresql+psycopg://repomind:repomind@localhost:5432/repomind
-alembic upgrade head
-```
+## Core vs. optional extras
 
-For local development without Docker, leave `DATABASE_URL` blank and RepoMind will create a SQLite database under `data/db/repomind.db`.
+| Feature | Needs |
+| --- | --- |
+| Analysis, hybrid retrieval (hashing embedder + BM25), graph, drift, static findings, API, UI | `requirements.txt` |
+| Tree-sitter parsing for JS/TS/Java/Go/Rust/C/C++/C#/Ruby/PHP/Kotlin/Swift/Scala (otherwise regex fallback; Python always uses its AST) | `requirements-advanced.txt` (included in the Docker image) |
+| Semantic embeddings, cross-encoder reranking | `requirements-advanced.txt` + `EMBEDDING_PROVIDER=sentence-transformers`, `RERANKER_PROVIDER=cross-encoder` |
+| Chroma dense backend | `requirements-advanced.txt` + `VECTOR_STORE_PROVIDER=chroma` |
+| MCP server | `requirements-advanced.txt` |
+| LLM-written answers, LLM-driven Detective | `GEMINI_API_KEY` or `OPENAI_*` settings |
 
-If you tried the PostgreSQL command but Docker is not installed, reset the shell variable before using the local SQLite path:
+## Retrieval benchmark
 
-```bash
-unset DATABASE_URL
-alembic upgrade head
-```
+`python -m evals.run_eval` (file-level retrieval, default hashing embedder):
 
-## Run Backend
+| system | hit@1 | hit@5 | MRR |
+|---|---|---|---|
+| dense only (hashing embedder) | 0.85 | 1.00 | 0.89 |
+| BM25 only | 0.80 | 1.00 | 0.89 |
+| **RepoMind hybrid** | **1.00** | **1.00** | **1.00** |
 
-```bash
-bash scripts/run_backend.sh
-```
+**Read these as a regression guard, not a quality claim:** 20 questions written by the author, on one synthetic fixture repo that the retriever's weights were tuned against, and the "dense" baseline is the lexical hashing embedder. With the optional general-purpose semantic embedder and cross-encoder, one local run scored hybrid recall@1 0.90 / MRR 0.95; CI's advanced job reports this each run. A held-out, multi-repo eval is the top roadmap item. Details in [CURRENT_STATE.md](CURRENT_STATE.md#8-evaluation).
 
-Open API docs at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
-
-The backend script runs without reload by default because macOS can deny file watching across virtualenv or data folders. To opt into reload during development:
+## Quick start
 
 ```bash
-RELOAD=1 bash scripts/run_backend.sh
+python3 -m venv .venv && source .venv/bin/activate
+python -m pip install -r requirements.txt            # core
+python -m pip install -r requirements-advanced.txt   # optional: tree-sitter, Chroma, semantic models (PyTorch), MCP
+cp .env.example .env                                 # optionally add GEMINI_API_KEY / OPENAI_* / GITHUB_TOKEN
+
+bash scripts/run_backend.sh     # FastAPI on http://127.0.0.1:8000 (docs at /docs)
+bash scripts/run_frontend.sh    # Streamlit UI on http://localhost:8501
 ```
 
-## Run Frontend
-
-In a second terminal:
+Analyze from the command line:
 
 ```bash
-bash scripts/run_frontend.sh
+curl -X POST http://127.0.0.1:8000/analyze_repo_async -H 'Content-Type: application/json' \
+  -d '{"repo_url": "https://github.com/tiangolo/fastapi"}'
+# → {"job_id": "...", "events_url": "/jobs/<id>/events", ...}   (stream progress with SSE)
 ```
 
-The Streamlit app lets you analyze a repository, inspect the generated summary, review weaknesses, copy the Mermaid diagram text, chat with the repo, and view citations.
+Use it from Claude Code over MCP (requires `requirements-advanced.txt`):
+
+```bash
+claude mcp add repomind -- "$PWD/.venv/bin/python" -m app.mcp_server
+```
+
+Repo size is pre-checked through the GitHub API (an optional `GITHUB_TOKEN` raises the rate limit) and the on-disk clone size is capped (`MAX_REPO_SIZE_MB`). For air-gapped runs set `OSV_SCAN_ENABLED=false` and `GITHUB_API_CHECKS_ENABLED=false`.
 
 ## Docker
 
 ```bash
-docker build -t repomind .
-docker run --rm -p 8000:8000 repomind
+echo "POSTGRES_PASSWORD=change-me" >> .env
+docker compose up --build        # postgres + api (:8000) + ui (:8501), bound to localhost
 ```
 
-The Docker image runs the FastAPI backend. Run the Streamlit UI locally or create a separate UI image if you want a two-container demo.
+The image installs runtime dependencies plus tree-sitter; test tooling and the semantic/Chroma/MCP extras are not included.
 
-## API Endpoints
+## API
 
-- `POST /analyze_repo`
-- `POST /analyze_repo_async`
-- `GET /analysis/{repo_id}/status`
-- `GET /repo/{repo_id}/summary`
-- `POST /repo/{repo_id}/chat`
-- `GET /repo/{repo_id}/weaknesses`
-- `GET /repo/{repo_id}/graph`
-- `DELETE /repo/{repo_id}`
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/analyze_repo_async` | Start analysis job (returns `job_id`) |
+| GET | `/jobs/{job_id}` · `/jobs/{job_id}/events` | Job status · Server-Sent Events progress |
+| POST | `/analyze_repo` | Synchronous analysis |
+| GET | `/repos` · `/analysis/{id}/status` | Analyzed repositories · analysis status |
+| GET | `/repo/{id}/summary` · `/weaknesses` · `/insights` | Analysis artifacts |
+| GET | `/repo/{id}/graph?view=summary\|files` | Code graph / file dependency graph |
+| GET | `/repo/{id}/symbols?name=` · `/file?path=&start=&end=` | Symbol lookup with callers/callees · code viewer |
+| POST | `/repo/{id}/chat` · `/search` · `/investigate` | Grounded answer · hybrid search · Detective agent |
+| DELETE | `/repo/{id}` | Remove all artifacts |
+| GET | `/health` · `/ready` | Liveness · configuration/readiness |
 
-Example:
+If `REPOMIND_API_KEY` is set, every call except `/health` requires the `X-API-Key` header. Rate limiting and job execution are in-process. One API worker is enforced per data directory; `ANALYSIS_QUEUE_CAPACITY` bounds queued plus running jobs (default 8). Run on Linux or macOS; distributed workers are not configured.
+
+## Snapshot consistency and CLI
+
+Analyses build immutable vector, graph, metadata and redacted source artifacts under unique run ids. A completed run becomes active with one atomic pointer replacement. Failed rebuilds retain the previous analysis; questions pin their run, and citations can open that historical source after a refresh. Old runs are retained until repository deletion. Monitor `data/` disk usage when refreshing frequently; automatic run pruning is not implemented.
+
+Install the CLI from this checkout:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/analyze_repo \
-  -H "Content-Type: application/json" \
-  -d '{"repo_url":"https://github.com/tiangolo/fastapi","force":false}'
+python -m pip install -e .
+repomind analyze https://github.com/owner/repo
+repomind analyze ./path/to/local/repo --force
+repomind ask <repo_id> 'How does this function work?'
+repomind check ./path/to/local/repo --format sarif --fail-on high
 ```
 
-## Example Questions
+Local analysis reads source files; it does not execute repository code or delete the original directory. A copied run's source viewer remains available without the local checkout. The Health tab includes filterable static findings with evidence and suggested fixes.
 
-- What does this repository do?
-- How do I install this on Linux?
-- How do I run this repository locally?
-- Which files should I read first?
-- How do the main modules depend on each other?
-- Where is the API entry point?
-- What routes are defined?
-- What tests exist and what is missing?
-- What are the highest-risk weaknesses?
-- How would you improve deployment readiness?
+## External evaluation
 
-## How Hybrid Retrieval Works
+The [evaluation workflow](evals/README.md) prepares 160 draft questions across eight SHA-pinned Python and JS/TS repositories, with repository-level development/test splits. It compares BM25, hashing, hybrid retrieval, graph and reranker ablations, and optional semantic/neural models. Results distinguish Hit@k, fractional recall, complete evidence retrieval and span coverage. Draft labels require an explicit flag and are not a release quality gate; independent answer/citation review and developer studies remain necessary. Application defaults are unchanged by experiments.
 
-1. The analyzer extracts deterministic repo facts: README summary, tree, languages, entrypoints, important files, package files, scripts, tests, docs, and deployment signals.
-2. The query router classifies questions into repo overview, run instructions, architecture, file/function explanation, dependency, weakness, improvement, testing, security, or general code intents.
-3. Vector search retrieves semantically relevant chunks with file path and line metadata.
-4. Graph retrieval scores nodes and edges such as imports, definitions, routes, calls, entry points, and package dependencies.
-5. Files discovered from facts and graph relationships are used to boost source chunks even when semantic similarity alone would miss them.
-6. The chat service formats a clean answer with direct explanation, important files, evidence, and uncertainty notes while keeping retrieval internals out of the user-facing UI.
+## Development
 
-## Limitations
+```bash
+python -m pip install -r requirements-dev.txt      # runtime + pytest, pytest-cov, ruff
+ruff check . && python -m pytest -q && python -m evals.run_eval
+python -m pytest --cov=app                          # coverage report
+alembic upgrade head    # PostgreSQL/SQLite schema migrations (DATABASE_URL, default SQLite under data/db)
+```
 
-- Chat and the Run Instructions assistant answer use Gemini when `GEMINI_API_KEY` is configured. They fall back locally when the API key is missing or a Gemini request fails.
-- Tree-sitter extraction is used when optional grammar packages are installed; regex remains an emergency fallback for languages without an available grammar.
-- Function call edges are best-effort and do not resolve dynamic dispatch or imports across modules.
-- Very large repositories may need higher chunk limits, a durable task queue, and a production-tuned database deployment.
-- Binary/media files are intentionally represented as metadata only.
-- Mermaid rendering in Streamlit uses a CDN component; the raw Mermaid source is always shown as a fallback.
-
-## Future Improvements
-
-- Add OpenAI provider support and richer provider selection for generative synthesis.
-- Add a durable worker queue such as Celery/RQ for multi-user background analysis.
-- Expand Tree-sitter query coverage for deeper call resolution and exports.
-- Stream analysis progress from the backend instead of polling in-memory status.
-- Add richer duplicate-code and modularity metrics.
-- Add authentication and multi-user project storage.
+100+ offline tests use temp repos and a fixture repo, never the network. CI runs lint, tests with coverage and the benchmark; a second job installs `requirements-advanced.txt` and exercises the optional backends plus the semantic embedder and cross-encoder; a third builds the Docker image.

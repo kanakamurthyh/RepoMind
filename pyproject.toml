@@ -1,12 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repomind"
+description = "Repository intelligence with inspectable source evidence"
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version", "dependencies"]
+
+[project.scripts]
+repomind = "app.cli:main"
+repomind-mcp = "app.mcp_server:main"
+
+[project.optional-dependencies]
+parsing = ["tree-sitter>=0.22", "tree-sitter-language-pack>=0.7"]
+semantic = ["sentence-transformers>=3.0"]
+chroma = ["chromadb>=0.5"]
+mcp = ["mcp>=1.2"]
+
+[tool.setuptools.dynamic]
+version = {attr = "app.__version__"}
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+include = ["app*", "evals*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+skip_empty = true
+precision = 1
 
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = ["data/repos", "data/indexes", "data/metadata"]
+exclude = ["data"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

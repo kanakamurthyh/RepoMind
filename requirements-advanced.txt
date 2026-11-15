@@ -1,8 +1,12 @@
-# Optional advanced retrieval/parsing dependencies.
-# Install these when you want semantic transformer embeddings, Chroma, and
-# Tree-sitter grammar support instead of local fallbacks.
+# Optional capabilities. RepoMind degrades gracefully when any of these are missing.
 -r requirements.txt
-sentence-transformers>=3.0
-chromadb>=0.5
+# Tree-sitter parsing for JS/TS/Java/Go/Rust/C/C++/C#/Ruby/PHP/Kotlin/Swift/Scala
 tree-sitter>=0.22
 tree-sitter-language-pack>=0.7
+# Chroma dense-vector backend (VECTOR_STORE_PROVIDER=chroma)
+chromadb>=0.5
+# Semantic embeddings + cross-encoder reranking (EMBEDDING_PROVIDER=sentence-transformers, RERANKER_PROVIDER=cross-encoder).
+# Pulls in PyTorch; models download from Hugging Face on first use. Installing it does not change the defaults.
+sentence-transformers>=3.0
+# Model Context Protocol server (python -m app.mcp_server)
+mcp>=1.2

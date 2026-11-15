@@ -1,20 +1,172 @@
-name: Tests
+name: CI
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: Lint + tests (core, Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip install --no-deps -e .
+      - name: Installed CLI smoke
+        run: repomind --help
+      - name: Lint
+        run: ruff check .
+      - name: Tests with coverage (offline, local fallbacks)
+        run: python -m pytest -q --cov=app --cov-report=term --cov-report=xml
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f .coverage ]; then
+            echo "## Coverage (core job)" >> "$GITHUB_STEP_SUMMARY"
+            python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-core-${{ matrix.python }}
+          path: coverage.xml
+          if-no-files-found: ignore
+      - name: Retrieval benchmark (hashing embedder, fixture repo)
+        run: python -m evals.run_eval | tee -a "$GITHUB_STEP_SUMMARY"
+
+  advanced:
+    # Installs requirements-advanced.txt (tree-sitter, Chroma, sentence-transformers, MCP) so the
+    # optional backends and the semantic-embedding / cross-encoder paths actually execute.
+    # Slow by design: PyTorch install plus Hugging Face model downloads on a cold cache.
+    name: Tests + semantic smoke (advanced extras, slow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      RERANKER_MODEL: cross-encoder/ms-marco-MiniLM-L-6-v2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install dependencies
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-advanced.txt
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: hf-${{ runner.os }}-${{ env.EMBEDDING_MODEL }}-${{ env.RERANKER_MODEL }}
+      - name: Install dependencies (CPU-only PyTorch)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-      - name: Run tests
-        run: python -m pytest -q
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements-advanced.txt -r requirements-dev.txt
+      - name: Tests with optional backends and coverage
+        run: python -m pytest -q --cov=app --cov-report=term --cov-report=xml
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f .coverage ]; then
+            echo "## Coverage (advanced job)" >> "$GITHUB_STEP_SUMMARY"
+            python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Semantic embedder + cross-encoder smoke and benchmark
+        # tests/conftest.py pins the local providers, so exercise the semantic paths explicitly here.
+        # Fails if either model silently falls back to the local implementation.
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os
+          import tempfile
+          from dataclasses import replace
+          from pathlib import Path
+
+          from app.config import Settings
+          from app.core.chat import ChatService
+          from app.core.repo_analyzer import RepoAnalyzer
+          from app.models import Chunk
+          from app.rag.embeddings import SentenceTransformerEmbedder, build_embedder
+          from app.rag.rerank import CrossEncoderReranker, build_reranker
+          from evals.fixture_repo import build_fixture
+          from evals.run_eval import FIXTURE_URL, LocalGitClient, evaluate, to_markdown
+
+          emb_model, rr_model = os.environ["EMBEDDING_MODEL"], os.environ["RERANKER_MODEL"]
+          embedder = build_embedder("sentence-transformers", emb_model, 8)
+          assert isinstance(embedder, SentenceTransformerEmbedder), "semantic embedder fell back to hashing"
+          vectors = embedder.embed_documents(["def add(a, b): return a + b", "README: how to run the server"])
+          assert len(vectors) == 2 and len(vectors[0]) > 0
+
+          reranker = build_reranker("cross-encoder", rr_model)
+          assert isinstance(reranker, CrossEncoderReranker), "cross-encoder fell back to the local reranker"
+          chunks = [
+              Chunk(id=f"c{i}", repo_id="r", file_path=p, language="python", role="code",
+                    start_line=1, end_line=2, text=t, score=1.0)
+              for i, (p, t) in enumerate([("auth.py", "def login(user, password): check password"),
+                                          ("math.py", "def add(a, b): return a + b")])
+          ]
+          ranked = reranker.rerank("where is the login password check?", chunks, ["general_code_question"])
+          assert [c.file_path for c in ranked][0] == "auth.py", ranked
+
+          with tempfile.TemporaryDirectory() as tmp:
+              work = Path(tmp)
+              repo = build_fixture(work / "fixture")
+              cfg = replace(
+                  Settings(), data_dir=work / "data", osv_scan_enabled=False, github_api_checks_enabled=False,
+                  llm_provider="off", embedding_provider="sentence-transformers", embedding_model=emb_model,
+                  reranker_provider="cross-encoder", reranker_model=rr_model, vector_store_provider="local",
+                  database_url="",
+              )
+              analyzer = RepoAnalyzer(cfg, git_client=LocalGitClient(repo))
+              result = analyzer.analyze(FIXTURE_URL)
+              assert isinstance(analyzer.vector_store.embedder, SentenceTransformerEmbedder)
+              chat = ChatService(analyzer, cfg)
+              print(f"## Semantic retrieval benchmark ({emb_model} + {rr_model})\n")
+              print(to_markdown(evaluate(analyzer, chat, result.repo_id)))
+          PY
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: repomind:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke-check the image
+        run: |
+          docker run --rm repomind:ci python -c "import app.main; print('app imports OK')"
+          docker run --rm repomind:ci python -c "import importlib.util as u, sys; sys.exit(1 if u.find_spec('pytest') else 0)"

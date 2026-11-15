@@ -17,8 +17,11 @@ class SummaryGenerator:
         graph: dict[str, Any],
         weaknesses: list[Weakness],
         facts: dict[str, Any],
+        insights: dict[str, Any] | None = None,
+        coverage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        quality_score = self.quality.score(facts, weaknesses)
+        insights = insights or {}
+        quality_score = self.quality.score(facts, weaknesses, graph, insights)
         summary = {
             "project_identity": {
                 "project_name": facts["project_title"],
@@ -26,6 +29,7 @@ class SummaryGenerator:
                 "one_line_summary": self._one_line(facts),
                 "what_this_repo_is_for": self._purpose(facts),
                 "target": facts["target_audience"],
+                "about": self._about(facts),
             },
             "tech_stack": self._tech_stack(facts),
             "main_structure": facts["top_folders"],
@@ -35,8 +39,13 @@ class SummaryGenerator:
             "architecture": {
                 "explanation": self._architecture_explanation(facts, graph),
                 "entrypoint_flow": self._entrypoint_flow(facts),
+                "entrypoint_flow_basis": "suggested reading order inferred from file roles, not a verified runtime call chain",
                 "important_modules": facts["important_modules"][:12],
                 "mermaid": self._architecture_mermaid(facts),
+                "mermaid_basis": "conceptual overview from file roles; arrows are not verified call relationships",
+                "dependency_mermaid": graph.get("mermaid", ""),
+                "central_files": graph.get("central_files", [])[:10],
+                "dependency_cycles": graph.get("dependency_cycles", [])[:5],
             },
             "strengths": self._strengths(facts, graph),
             "risks": [w.to_dict() for w in weaknesses if w.severity in {"high", "medium"}][:10],
@@ -56,11 +65,50 @@ class SummaryGenerator:
                 "node_kinds": graph.get("node_kinds", {}),
                 "edge_relations": graph.get("edge_relations", {}),
                 "top_dependencies": graph.get("top_dependencies", []),
+                "unresolved_calls": graph.get("unresolved_calls", 0),
+                "parser_backends": graph.get("parser_backends", {}),
             },
+            "insights": self._insights(insights, graph),
             "legacy": self._legacy_fields(facts, weaknesses, quality_score),
         }
-        summary.update(summary["legacy"])
+        if coverage is not None:
+            # Which files the scan/chunk caps left out; see app/ingestion/coverage.py.
+            summary["coverage"] = coverage
         return summary
+
+    def _insights(self, insights: dict[str, Any], graph: dict[str, Any]) -> dict[str, Any]:
+        drift = insights.get("drift") or {}
+        deps = insights.get("dependencies") or {}
+        history = insights.get("history") or {}
+        return {
+            "docs_drift": {
+                "docs_accuracy": drift.get("docs_accuracy"),
+                "issue_count": drift.get("issue_count", 0),
+                "top_issues": drift.get("issues", [])[:8],
+            },
+            "dependencies": {
+                "scan_status": deps.get("scan_status", "skipped"),
+                "packages_scanned": deps.get("packages_scanned", 0),
+                "inventory_packages": deps.get("inventory_packages", 0),
+                "inventory_truncated": deps.get("inventory_truncated", False),
+                "inventory_warnings": deps.get("inventory_warnings", []),
+                "vulnerabilities": deps.get("vulnerabilities", [])[:15],
+                "unpinned_count": deps.get("unpinned_count", len(deps.get("unpinned", []))),
+                "note": deps.get("note", ""),
+            },
+            "history": {
+                "status": history.get("status", "unavailable"),
+                "commits_analyzed": history.get("commits_analyzed", 0),
+                "bus_factor": history.get("bus_factor"),
+                "hotspots": history.get("hotspots", [])[:10],
+                "note": history.get("note", ""),
+            },
+            "code_health": {
+                "complex_functions": graph.get("complex_functions", [])[:10],
+                "unreferenced_private_functions": graph.get("unreferenced_private_functions", [])[:10],
+                "dependency_cycles": graph.get("dependency_cycles", [])[:5],
+            },
+        }
 
     def _one_line(self, facts: dict[str, Any]) -> str:
         languages = ", ".join(self._display_name(item["language"]) for item in facts.get("languages", [])[:3])
@@ -69,8 +117,8 @@ class SummaryGenerator:
             role = "CLI/tooling repository"
         elif facts.get("api_route_files"):
             role = "API application"
-        elif "Debian packaging" in facts.get("frameworks", []):
-            role = "packaging-focused project"
+        elif facts.get("frameworks"):
+            role = f"{facts['frameworks'][0]} project"
         if languages:
             article = "an" if role[0].lower() in {"a", "e", "i", "o", "u"} else "a"
             return f"{facts['project_title']} appears to be {article} {role} built mainly with {languages}."
@@ -89,6 +137,44 @@ class SummaryGenerator:
             inferred.append("testable project components")
         inferred_text = ", ".join(inferred) if inferred else "the files and project metadata found in the repo"
         return f"{readme_summary} Based on the repository structure, it appears to target {inferred_text}."
+
+    def _about(self, facts: dict[str, Any]) -> dict[str, Any]:
+        """Plain-language project description; README statements are kept apart from structural inference."""
+        readme_paths = facts.get("readme_paths", [])
+        readme_features = facts.get("readme_features", [])
+        has_readme_purpose = bool(readme_paths) and facts.get("readme_has_overview", False)
+        return {
+            "what_it_is": self._one_line(facts),
+            "why_it_exists": facts.get("readme_summary", "") if has_readme_purpose else "",
+            "why_it_exists_source": readme_paths[0] if has_readme_purpose else None,
+            "what_it_does": [{"text": item["text"], "source": f"{item['source']}:{item['line']}"} for item in readme_features]
+            or [{"text": text, "source": "inferred from repository structure"} for text in self._inferred_capabilities(facts)],
+            "what_it_does_basis": "readme" if readme_features else "inferred",
+            "who_it_is_for": facts.get("target_audience", ""),
+        }
+
+    def _inferred_capabilities(self, facts: dict[str, Any]) -> list[str]:
+        capabilities = []
+        if facts.get("api_route_files"):
+            capabilities.append(f"Serves an HTTP API (routes defined in {self._paths(facts['api_route_files'])}).")
+        if facts.get("cli_files"):
+            capabilities.append(f"Provides a command-line interface ({self._paths(facts['cli_files'])}).")
+        ui_frameworks = [name for name in facts.get("frameworks", []) if name in {"Streamlit", "Gradio", "React", "Next.js", "Vue", "Angular", "Svelte"}]
+        if ui_frameworks:
+            capabilities.append(f"Ships a user interface built with {', '.join(ui_frameworks)}.")
+        ml_frameworks = [name for name in facts.get("frameworks", []) if name in {"PyTorch", "TensorFlow", "scikit-learn", "Hugging Face Transformers", "LangChain", "LlamaIndex"}]
+        if ml_frameworks:
+            capabilities.append(f"Uses machine-learning / AI tooling ({', '.join(ml_frameworks)}).")
+        if facts.get("main_entrypoints") and not capabilities:
+            capabilities.append(f"Runs from {self._paths([entry['path'] for entry in facts['main_entrypoints']])}.")
+        if facts.get("deployment_files"):
+            capabilities.append(f"Includes deployment configuration ({self._paths(facts['deployment_files'])}).")
+        if facts.get("has_tests"):
+            capabilities.append(f"Has an automated test suite ({facts.get('test_file_count', 0)} test file(s)).")
+        return capabilities
+
+    def _paths(self, paths: list[str], limit: int = 3) -> str:
+        return ", ".join(f"`{path}`" for path in paths[:limit])
 
     def _tech_stack(self, facts: dict[str, Any]) -> list[dict[str, str | int]]:
         rows: list[dict[str, str | int]] = []
@@ -142,7 +228,7 @@ class SummaryGenerator:
         support_modules = self._support_modules(facts, {entry["path"] for entry in entries})
         if support_modules:
             module_text = "; ".join(f"`{item['path']}` {item['reason'].rstrip('.')}" for item in support_modules[:3])
-            flow.append(f"{len(flow) + 1}. Core logic then flows through {module_text}.")
+            flow.append(f"{len(flow) + 1}. Inspect these supporting modules: {module_text}.")
 
         test_like = [path for path in facts.get("file_tree", []) if any(marker in path.lower() for marker in ("test", "evaluate", "eval"))]
         if test_like:

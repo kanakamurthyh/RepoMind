@@ -40,8 +40,21 @@ class Chunk:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Chunk":
-        return cls(**data)
+    def from_dict(cls, data: dict[str, Any]) -> Chunk:
+        allowed = {"id", "repo_id", "file_path", "language", "role", "start_line", "end_line", "text", "score", "symbol", "metadata"}
+        return cls(**{key: value for key, value in data.items() if key in allowed})
+
+    @property
+    def header(self) -> str:
+        """Contextual header prepended to the text before embedding/lexical indexing."""
+        header = self.metadata.get("header") if self.metadata else None
+        if header:
+            return str(header)
+        return f"{self.file_path}" + (f" › {self.symbol}" if self.symbol else "")
+
+    @property
+    def index_text(self) -> str:
+        return f"{self.header}\n{self.text}"
 
 
 @dataclass(slots=True)
@@ -52,6 +65,10 @@ class CodeEntity:
     start_line: int
     end_line: int
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def qualname(self) -> str:
+        return str(self.metadata.get("qualname") or self.name)
 
 
 @dataclass(slots=True)
@@ -86,14 +103,18 @@ class AnalysisResult:
     graph: dict[str, Any]
     chunks: list[Chunk]
     statuses: list[str]
+    commit_sha: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, include_chunks: bool = True) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "repo_id": self.repo_id,
             "repo_url": self.repo_url,
+            "commit_sha": self.commit_sha,
             "summary": self.summary,
             "weaknesses": [w.to_dict() for w in self.weaknesses],
             "graph": self.graph,
-            "chunks": [c.to_dict() for c in self.chunks],
             "statuses": self.statuses,
         }
+        if include_chunks:
+            data["chunks"] = [c.to_dict() for c in self.chunks]
+        return data

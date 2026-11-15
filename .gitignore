@@ -9,9 +9,28 @@ venv/
 data/repos/*
 data/indexes/*
 data/metadata/*
+data/graphs/*
+data/runs/*
+data/evals/*
+data/build/
+data/review_*/
+node_modules/
+*.egg-info/
+data/db/*
 !data/repos/.gitkeep
 !data/indexes/.gitkeep
 !data/metadata/.gitkeep
+!data/graphs/.gitkeep
 *.sqlite
 *.db
 .DS_Store
+
+# Coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Generated research artifacts (not source; see AGENTS.md)
+research_notes/
+reports/

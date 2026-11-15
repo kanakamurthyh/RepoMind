@@ -24,7 +24,7 @@ SCRIPT_EXTS = {".sh", ".bash", ".ps1"}
 SOURCE_DIR_NAMES = {"src", "app", "lib", "package", "packages", "backend", "frontend"}
 TEST_DIR_NAMES = {"test", "tests", "__tests__", "spec", "specs"}
 DOC_DIR_NAMES = {"docs", "doc", "documentation"}
-README_NOISE = re.compile(r"(screenshot|still image|captured on|ubuntu\s+\d|lxqt|badge|!\[|https?://)", re.IGNORECASE)
+README_NOISE = re.compile(r"(screenshot|badge|!\[|https?://|<img|shields\.io)", re.IGNORECASE)
 RUN_SECTION_RE = re.compile(
     r"\b(prerequisites?|install(?:ation)?|setup|quickstart|getting started|fresh vm|build|run|usage|deploy(?:ment)?|uninstall|troubleshoot(?:ing)?|acceptance checklist)\b",
     re.IGNORECASE,
@@ -33,6 +33,43 @@ SHELL_PROMPT_RE = re.compile(r"^\s*(?:\$|#)\s+")
 COMMAND_START_RE = re.compile(
     r"^\s*(sudo\s+|python[3]?\s+|pip[3]?\s+|uv\s+|poetry\s+|npm\s+|pnpm\s+|yarn\s+|make\s+|docker\s+|docker-compose\s+|bash\s+|sh\s+|./|apt\s+|apt-get\s+|systemctl\s+|cp\s+|mkdir\s+|chmod\s+|export\s+|curl\s+|wget\s+)"
 )
+FRAMEWORK_PACKAGES = {
+    "FastAPI": {"fastapi"},
+    "Flask": {"flask"},
+    "Django": {"django"},
+    "Streamlit": {"streamlit"},
+    "Gradio": {"gradio"},
+    "SQLAlchemy": {"sqlalchemy"},
+    "Pydantic": {"pydantic"},
+    "Celery": {"celery"},
+    "PyTorch": {"torch", "pytorch"},
+    "TensorFlow": {"tensorflow"},
+    "scikit-learn": {"sklearn", "scikit-learn"},
+    "Hugging Face Transformers": {"transformers"},
+    "LangChain": {"langchain", "langchain-core"},
+    "LlamaIndex": {"llama-index", "llama_index"},
+    "pandas": {"pandas"},
+    "React": {"react"},
+    "Next.js": {"next"},
+    "Vue": {"vue"},
+    "Angular": {"@angular/core"},
+    "Svelte": {"svelte"},
+    "Express": {"express"},
+    "NestJS": {"@nestjs/core"},
+    "Spring": {"org.springframework", "spring-boot-starter"},
+    "Gin": {"github.com/gin-gonic/gin"},
+    "Actix": {"actix-web"},
+}
+UI_MARKERS = re.compile(r"^\s*(?:import\s+streamlit|from\s+streamlit\b|import\s+gradio)", re.MULTILINE)
+WEB_MARKERS = re.compile(r"\b(?:FastAPI|Flask|APIRouter|Blueprint)\s*\(|\bexpress\s*\(\s*\)|@(?:app|router)\.(?:get|post|put|delete|patch|route)\b|createServer\s*\(")
+CLI_MARKERS = re.compile(r"\b(?:import\s+argparse|from\s+argparse|import\s+click|from\s+click|import\s+typer|from\s+typer|require\(['\"]commander['\"]\)|from\s+['\"]commander['\"]|flag\.Parse\(\)|clap::)")
+# Headings whose whole text names the project's features ("🚀 Key Features", "2. What it does"), not e.g. "Engineered Features".
+FEATURE_SECTION_RE = re.compile(r"^(?:key |main |core )?(?:features?(?: overview)?|what (?:it|this project) does|capabilities|highlights)$", re.IGNORECASE)
+OVERVIEW_SECTION_RE = re.compile(r"^(?:overview|about|introduction|summary)$", re.IGNORECASE)
+NON_PROSE_START_RE = re.compile(r"^(?:[|>#<!+-]|\*(?!\*)|\d+[.)]\s|-{3,}|\*{3,})")
+PURPOSE_SECTION_RE = re.compile(r"\b(?:overview|about|introduction|summary|problem|purpose|motivation|why)\b", re.IGNORECASE)
+TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$")
 OFFICIAL_DOC_NAMES = {"readme.md", "install.md", "installation.md", "setup.md", "quickstart.md", "getting_started.md", "getting-started.md"}
 
 
@@ -40,8 +77,9 @@ class RepoFactsCollector:
     """Collect deterministic facts that summaries and answers can trust."""
 
     def collect(self, repo_url: str, records: list[FileRecord], graph: dict[str, Any]) -> dict[str, Any]:
-        by_name = {Path(record.path).name.lower(): record for record in records}
-        by_path = {record.path: record for record in records}
+        by_name: dict[str, FileRecord] = {}
+        for record in sorted(records, key=lambda item: (item.path.count("/"), item.path)):
+            by_name.setdefault(Path(record.path).name.lower(), record)
         languages = Counter(record.language for record in records if record.language not in {"unknown", "text"})
         readmes = [record for record in records if Path(record.path).name.lower().startswith("readme")]
         folders = Counter(self._top_folder(record.path) for record in records)
@@ -59,7 +97,7 @@ class RepoFactsCollector:
         entrypoints = self._entrypoints(records, graph, scripts)
         api_route_files = self._api_route_files(graph)
         cli_files = self._cli_files(records)
-        important_files = self._important_files(records, entrypoints, api_route_files)
+        important_files = self._important_files(records, entrypoints, api_route_files, graph)
         run_instructions = self._run_instructions(by_name, markdown_instructions)
         title = self._readme_title(readmes) or repo_url.rstrip("/").split("/")[-1]
 
@@ -74,6 +112,8 @@ class RepoFactsCollector:
             "run_doc_sections": markdown_instructions["sections"],
             "official_helper_commands": markdown_instructions["helper_commands"],
             "readme_summary": self._readme_summary(readmes),
+            "readme_has_overview": self._readme_overview(readmes) is not None,
+            "readme_features": self._readme_features(readmes),
             "languages": [{"language": lang, "files": count} for lang, count in languages.most_common()],
             "dependency_files": dependency_files,
             "config_files": sorted(config_files)[:30],
@@ -92,12 +132,14 @@ class RepoFactsCollector:
             "important_files": important_files,
             "run_instructions": run_instructions,
             "target_audience": self._target_audience(readmes, records),
-            "frameworks": self._frameworks(records),
+            "frameworks": self._frameworks(records, graph),
             "top_folders": [{"path": folder, "files": count, "purpose": self._folder_purpose(folder)} for folder, count in folders.most_common(12)],
+            "test_files": sorted(record.path for record in records if record.role == "test")[:300],
+            "code_file_count": sum(1 for record in records if record.role == "code"),
+            "test_file_count": sum(1 for record in records if record.role == "test"),
             "has_tests": bool(test_dirs or any(record.role == "test" for record in records)),
             "has_readme": bool(readmes),
             "has_run_instructions": any(item["confidence"] in {"high", "medium"} and item["command"] != "Not clearly documented." for item in run_instructions),
-            "record_line_index": {path: by_path[path].line_count for path in by_path},
         }
         return facts
 
@@ -126,13 +168,27 @@ class RepoFactsCollector:
         return None
 
     def _readme_summary(self, readmes: list[FileRecord]) -> str:
+        overview = self._readme_overview(readmes)
+        if overview:
+            return overview
+        title = self._readme_title(readmes)
+        if title:
+            return f"The README identifies the project as {title}, but does not provide a strong prose overview. RepoMind infers the purpose from files, entrypoints, and package metadata."
+        return "No substantive README description was found; the project description is inferred from files and metadata."
+
+    def _readme_overview(self, readmes: list[FileRecord]) -> str | None:
+        """The README paragraph that best describes the project, if any."""
+        for record in readmes:
+            intro = self._intro_paragraph(record)
+            if intro:
+                return intro
         for record in readmes:
             candidates = []
             for index, paragraph in enumerate(re.split(r"\n\s*\n", record.text)):
                 if "```" in paragraph:
                     continue
                 clean = self._clean_markdown(paragraph)
-                if len(clean) < 60 or README_NOISE.search(clean) or self._looks_like_command_block(clean):
+                if len(clean) < 60 or README_NOISE.search(clean) or self._looks_like_command_block(clean) or self._looks_like_tag_line(clean):
                     continue
                 lower = clean.lower()
                 score = sum(word in lower for word in ("project", "tool", "agent", "package", "test", "analy", "run", "build", "cli", "validation", "verifies", "automated"))
@@ -144,10 +200,81 @@ class RepoFactsCollector:
             if candidates:
                 candidates.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
                 return candidates[0][1][:600]
-        title = self._readme_title(readmes)
-        if title:
-            return f"The README identifies the project as {title}, but does not provide a strong prose overview. RepoMind infers the purpose from files, entrypoints, and package metadata."
-        return "No substantive README description was found; the project description is inferred from files and metadata."
+        return None
+
+    def _intro_paragraph(self, record: FileRecord) -> str | None:
+        """First prose paragraph under the title or an overview/purpose heading, where READMEs usually say what the project is."""
+        for section in self._markdown_sections(record):
+            heading_line = section["lines"][0] if section["lines"] else ""
+            is_title = bool(re.match(r"^\s{0,3}#\s", heading_line))
+            if not is_title and not PURPOSE_SECTION_RE.search(section["heading"]):
+                continue
+            body = "\n".join(section["lines"][1:] if re.match(r"^\s{0,3}#", heading_line) else section["lines"])
+            for paragraph in re.split(r"\n\s*\n", body):
+                first = paragraph.strip().splitlines()[0].strip() if paragraph.strip() else ""
+                if not first or "```" in paragraph or NON_PROSE_START_RE.match(first):
+                    continue
+                if re.fullmatch(r"(\*\*|__|\*|_).+?\1", first):
+                    continue  # bold/italic tagline such as "**Solar Plant Feasibility Analysis**"
+                clean = self._clean_markdown(paragraph)
+                if len(clean) >= 60 and not README_NOISE.search(clean) and not self._looks_like_command_block(clean) and not self._looks_like_tag_line(clean):
+                    return clean[:600]
+        return None
+
+    def _looks_like_tag_line(self, text: str) -> bool:
+        """Badge-style lines such as "`Python` · `XGBoost` · `Streamlit`" carry no prose."""
+        prose = re.sub(r"`[^`]*`", "", text)
+        return len(re.findall(r"[A-Za-z]{3,}", prose)) < 6
+
+    def _readme_features(self, readmes: list[FileRecord], limit: int = 8) -> list[dict[str, Any]]:
+        """Bullet points or table rows the README lists under a features heading, else under an overview heading."""
+        for heading_re in (FEATURE_SECTION_RE, OVERVIEW_SECTION_RE):
+            features = self._readme_list_items(readmes, heading_re, limit)
+            if features:
+                return features
+        return []
+
+    def _readme_list_items(self, readmes: list[FileRecord], heading_re: re.Pattern[str], limit: int) -> list[dict[str, Any]]:
+        features: list[dict[str, Any]] = []
+        for record in readmes:
+            lines = record.text.splitlines()
+            for section in self._markdown_sections(record):
+                heading = re.sub(r"^[^A-Za-z]+", "", section["heading"]).strip().rstrip(":")
+                if not heading_re.match(heading):
+                    continue
+                in_fence = False
+                for line_number in range(section["start_line"] + 1, section.get("end_line", len(lines)) + 1):
+                    line = lines[line_number - 1]
+                    if line.strip().startswith("```"):
+                        in_fence = not in_fence
+                        continue
+                    next_line = lines[line_number] if line_number < len(lines) else ""
+                    is_table_header = line.strip().startswith("|") and bool(TABLE_SEPARATOR_RE.match(next_line))
+                    text = "" if in_fence or is_table_header else self._feature_text(line)
+                    if text:
+                        features.append({"text": text, "source": record.path, "line": line_number})
+                    if len(features) >= limit:
+                        return features
+            if features:
+                return features
+        return features
+
+    def _feature_text(self, line: str) -> str:
+        item = LIST_ITEM_RE.match(line)
+        if item:
+            text = item.group(1)
+        elif line.strip().startswith("|"):
+            if TABLE_SEPARATOR_RE.match(line):
+                return ""
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            text = " — ".join(cell for cell in cells[:2] if cell)
+        else:
+            return ""
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"(\*\*|__|`)", "", text).strip()
+        if len(text) < 8 or README_NOISE.search(text):
+            return ""
+        return text[:240]
 
     def _clean_markdown(self, text: str) -> str:
         lines = []
@@ -176,28 +303,31 @@ class RepoFactsCollector:
 
     def _entrypoints(self, records: list[FileRecord], graph: dict[str, Any], scripts: list[str]) -> list[dict[str, str]]:
         entries: list[dict[str, str]] = []
-        common_names = {"main.py", "app.py", "server.py", "manage.py", "index.js", "cli.py", "__main__.py"}
+        common_names = {"main.py", "app.py", "server.py", "manage.py", "wsgi.py", "asgi.py", "index.js", "index.ts", "server.js", "server.ts", "main.go", "main.rs", "cli.py", "__main__.py"}
         for record in records:
             name = Path(record.path).name.lower()
-            if name in common_names:
+            if name in common_names and record.role == "code":
                 reason = self._entrypoint_reason(record, name)
                 entries.append({"path": record.path, "reason": reason, "kind": self._entrypoint_kind(record, name)})
         for node in graph.get("nodes", []):
-            if node.get("kind") == "entrypoint" and node.get("file_path"):
+            if node.get("kind") == "entrypoint" and node.get("file_path") and not self._is_test_path(node["file_path"], records):
                 entries.append({"path": node["file_path"], "reason": "Runs directly because it contains a Python `if __name__ == '__main__'` guard.", "kind": "script"})
-            if node.get("kind") == "route" and node.get("file_path"):
+            if node.get("kind") == "route" and node.get("file_path") and not self._is_test_path(node["file_path"], records):
                 entries.append({"path": node["file_path"], "reason": "Defines web/API route handlers that receive user or HTTP requests.", "kind": "web_api"})
         return self._dedupe_dicts(entries, "path")[:20]
 
+    def _is_test_path(self, path: str, records: list[FileRecord]) -> bool:
+        return any(record.path == path and record.role == "test" for record in records)
+
     def _entrypoint_kind(self, record: FileRecord, name: str) -> str:
-        lower = record.text[:5000].lower()
-        if "streamlit" in lower or "st." in lower:
+        head = record.text[:20000]
+        if UI_MARKERS.search(head):
             return "streamlit_ui"
-        if any(marker in lower for marker in ("fastapi(", "flask(", "@app.get", "@app.post", "express()")):
+        if WEB_MARKERS.search(head):
             return "web_api"
-        if "argparse" in lower or "click." in lower or "typer." in lower or name in {"cli.py", "__main__.py"}:
+        if CLI_MARKERS.search(head) or name in {"cli.py", "__main__.py"}:
             return "cli"
-        if "if __name__" in lower and "__main__" in lower:
+        if re.search(r"^if\s+__name__\s*==\s*['\"]__main__['\"]", head, re.MULTILINE):
             return "script"
         if name in {"app.py", "server.py", "index.js"}:
             return "application"
@@ -224,11 +354,10 @@ class RepoFactsCollector:
     def _cli_files(self, records: list[FileRecord]) -> list[str]:
         cli_files = []
         for record in records:
-            lower = record.text.lower()[:8000]
             name = Path(record.path).name.lower()
-            if record.language not in {"python", "javascript", "typescript", "shell"}:
+            if record.role != "code" or record.language not in {"python", "javascript", "typescript", "go", "rust"}:
                 continue
-            if "argparse" in lower or "click." in lower or "typer." in lower or "commander" in lower or "cli" in name:
+            if CLI_MARKERS.search(record.text[:20000]) or re.search(r"(^|[_-])cli([_.-]|$)", name):
                 cli_files.append(record.path)
         return sorted(set(cli_files))[:20]
 
@@ -303,11 +432,9 @@ class RepoFactsCollector:
     def _is_helper_doc_command(self, command: dict[str, Any]) -> bool:
         heading = str(command.get("heading", "")).lower()
         text = str(command.get("command", "")).lower()
-        if any(marker in heading for marker in ("optional", "demo", "benchmark", "smoke", "troubleshoot", "acceptance", "mock cms")):
+        if re.search(r"\b(optional|demo|benchmarks?|smoke|troubleshoot(?:ing)?|acceptance|profil(?:e|ing)|contribut(?:e|ing)|development)\b", heading):
             return True
-        if any(marker in text for marker in ("benchmarks/", "devtools/", "smoke_test", "measure_", "setup-demo-vm", "mock-cms/")):
-            return True
-        return False
+        return bool(re.search(r"(^|[\s/])(benchmarks?|devtools|tools/dev|perf)/|smoke[_-]test|\bbenchmark", text))
 
     def _markdown_sections(self, record: FileRecord) -> list[dict[str, Any]]:
         lines = record.text.splitlines()
@@ -369,7 +496,7 @@ class RepoFactsCollector:
             return False
         return COMMAND_START_RE.search(line) is not None
 
-    def _important_files(self, records: list[FileRecord], entrypoints: list[dict[str, str]], api_route_files: list[str]) -> list[dict[str, str]]:
+    def _important_files(self, records: list[FileRecord], entrypoints: list[dict[str, str]], api_route_files: list[str], graph: dict[str, Any]) -> list[dict[str, str]]:
         important: list[dict[str, str]] = []
         important_names = {
             "readme.md": "Project documentation and onboarding.",
@@ -384,14 +511,16 @@ class RepoFactsCollector:
             "dockerfile": "Container deployment entrypoint.",
             ".env.example": "Environment variable documentation.",
         }
-        for record in records:
+        for record in sorted(records, key=lambda item: (item.path.count("/"), item.path)):
             name = Path(record.path).name.lower()
-            if name in important_names:
+            if name in important_names and record.path.count("/") <= 1:
                 important.append({"path": record.path, "role": record.role, "reason": important_names[name]})
         for item in entrypoints:
             important.append({"path": item["path"], "role": "entrypoint", "reason": item["reason"]})
         for path in api_route_files:
             important.append({"path": path, "role": "api", "reason": "Defines detected API routes."})
+        for item in graph.get("central_files", [])[:8]:
+            important.append({"path": item["path"], "role": "core", "reason": f"Central module: imported/called by {item['in_degree']} other file(s)."})
         return self._dedupe_dicts(important, "path")[:30]
 
     def _run_instructions(self, by_name: dict[str, FileRecord], markdown_instructions: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -493,14 +622,12 @@ class RepoFactsCollector:
             details.append(f"defines {routes} web/API route handler(s)")
         if "evaluate" in lower_path or "metric" in lower_path:
             details.append("evaluates outputs or reports metrics")
-        if name in {"model.py", "models.py"} or any(marker in text for marker in ("torch", "tensorflow", "keras", "sklearn", "xgboost", "fit(", "predict(")):
+        if re.search(r"^\s*(?:import|from)\s+(?:torch|tensorflow|keras|sklearn|xgboost|lightgbm|transformers)\b", text, re.MULTILINE) or re.search(r"\.(?:fit|predict)\(", text):
             details.append("contains model or ML inference/training logic")
         if "preprocess" in lower_path or "transform" in lower_path or "clean" in lower_path:
             details.append("prepares or transforms input data before core processing")
         if "config" in lower_path or name in {"settings.py", "config.py"}:
             details.append("centralizes configuration used by other modules")
-        if "feasib" in lower_path or "analysis" in lower_path or "forecast" in lower_path:
-            details.append("contains domain analysis/business logic")
         if name in {"api.py", "server.py", "app.py"}:
             details.append("connects the application surface to backend logic")
         if definitions:
@@ -513,31 +640,27 @@ class RepoFactsCollector:
             details.append("source file detected with analyzable code")
         return "; ".join(details[:3]) + "."
 
-    def _frameworks(self, records: list[FileRecord]) -> list[str]:
-        text = "\n".join(record.text[:6000].lower() for record in records if record.role in {"config", "code", "docs"})
-        candidates = {
-            "FastAPI": "fastapi",
-            "Flask": "flask",
-            "Django": "django",
-            "Streamlit": "streamlit",
-            "React": "react",
-            "Next.js": "next",
-            "Express": "express",
-            "PyTorch": "torch",
-            "TensorFlow": "tensorflow",
-            "Debian packaging": "debian",
-            "Shell scripts": "#!/bin/bash",
-        }
-        return [label for label, needle in candidates.items() if needle in text]
+    def _frameworks(self, records: list[FileRecord], graph: dict[str, Any]) -> list[str]:
+        """Frameworks come from declared/imported dependencies, never from raw substrings."""
+        dependencies = {str(dep).lower() for dep in graph.get("dependencies", [])}
+        dependencies |= {str(node.get("label", "")).lower() for node in graph.get("nodes", []) if node.get("kind") == "dependency"}
+        dependencies |= {str(item.get("dependency", "")).lower() for item in graph.get("top_dependencies", [])}
+        found = [label for label, packages in FRAMEWORK_PACKAGES.items() if dependencies & packages]
+        if any(Path(record.path).name.lower() == "dockerfile" for record in records):
+            found.append("Docker")
+        return found
 
     def _target_audience(self, readmes: list[FileRecord], records: list[FileRecord]) -> str:
-        text = " ".join(record.text[:3000].lower() for record in readmes)
-        if "cli" in text or any(path.name.lower() in {"cli.py", "analyse.py", "analyze.py"} for path in map(lambda r: Path(r.path), records)):
+        text = " ".join(record.text[:4000] for record in readmes)
+        code_head = "\n".join(record.text[:4000] for record in records if record.role == "code")
+        if re.search(r"\b(?:CLI|command[- ]line)\b", text) or CLI_MARKERS.search(code_head):
             return "developers or operators using command-line tooling"
-        if "api" in text or any("fastapi" in record.text.lower() or "flask" in record.text.lower() for record in records):
+        if re.search(r"\b(?:API|REST|endpoints?|HTTP)\b", text) or WEB_MARKERS.search(code_head):
             return "developers integrating or operating an API service"
-        if "test" in text or "agent" in text:
-            return "developers working with test automation or agent workflows"
+        if re.search(r"\b(?:library|SDK|package)\b", text, re.IGNORECASE):
+            return "developers consuming a library or SDK"
+        if UI_MARKERS.search(code_head):
+            return "end users of an interactive data/ML app"
         return "developers or maintainers of the repository"
 
     def _folder_purpose(self, folder: str) -> str:
@@ -550,7 +673,11 @@ class RepoFactsCollector:
             "docs": "documentation",
             "scripts": "automation scripts",
             "packaging": "packaging or distribution assets",
-            "debian": "Debian packaging metadata",
+            "lib": "library code",
+            "packages": "workspace packages",
+            "examples": "usage examples",
+            ".github": "CI/CD and repository automation",
+            "migrations": "database migrations",
         }
         return purposes.get(root, "project module or supporting assets")
 

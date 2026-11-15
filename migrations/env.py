@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sys
 from logging.config import fileConfig
 from pathlib import Path
-import sys
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -10,6 +10,7 @@ from sqlalchemy import engine_from_config, pool
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings
+from app.db.models import Base
 
 config = context.config
 if config.config_file_name is not None:
@@ -17,7 +18,7 @@ if config.config_file_name is not None:
 
 config.set_main_option("sqlalchemy.url", settings.resolved_database_url)
 
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
